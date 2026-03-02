@@ -1,0 +1,23 @@
+services:
+  tripshare:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - tripshare-data:/app/data
+    environment:
+      - PORT=8080
+      - DB_PATH=/app/data/tripshare.db
+    restart: unless-stopped
+    networks:
+      - app-net
+
+networks:
+  app-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  tripshare-data:
