@@ -16,7 +16,7 @@
       <nav>
         <button class="nav-btn active" data-tab="dashboard">Dashboard</button>
         <button class="nav-btn" data-tab="members">Members</button>
-        <button class="nav-btn" data-tab="trips">Trips</button>
+        <button class="nav-btn" data-tab="trips">Expenses</button>
       </nav>
     </div>
   </header>
@@ -48,8 +48,8 @@
     <!-- Trips Tab -->
     <section id="tab-trips" class="tab-content">
       <div class="section-header">
-        <h2>Trips</h2>
-        <button class="btn btn-primary" onclick="openTripModal()">+ New Trip</button>
+        <h2>Expenses</h2>
+        <button class="btn btn-primary" onclick="openTripModal()">+ New Expense</button>
       </div>
       <div id="trips-list"></div>
     </section>
@@ -78,11 +78,11 @@
   <div id="trip-modal" class="modal">
     <div class="modal-backdrop" onclick="closeModal('trip-modal')"></div>
     <div class="modal-content">
-      <h3 id="trip-modal-title">New Trip</h3>
+      <h3 id="trip-modal-title">New Expense</h3>
       <form id="trip-form" onsubmit="saveTrip(event)">
         <input type="hidden" id="trip-id">
         <div class="form-group">
-          <label for="trip-name">Trip Name</label>
+          <label for="trip-name">Name</label>
           <input type="text" id="trip-name" required placeholder="e.g. Orgy Party in Arzenal with the gang">
         </div>
         <div class="form-row">

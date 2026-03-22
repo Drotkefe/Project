@@ -221,8 +221,8 @@ function renderTrips() {
         </table>
         <div class="trip-actions-bar">
           <button class="btn btn-primary btn-sm" onclick="openPaymentModal(${t.id})">+ Add Payment</button>
-          <button class="btn btn-ghost btn-sm" onclick="editTrip(${t.id})">Edit Trip</button>
-          <button class="btn btn-danger btn-sm" onclick="deleteTrip(${t.id})">Delete Trip</button>
+          <button class="btn btn-ghost btn-sm" onclick="editTrip(${t.id})">Edit Expense</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteTrip(${t.id})">Delete Expense</button>
         </div>
       </div>
     </div>`;
