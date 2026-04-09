@@ -11,7 +11,29 @@ type BalanceService struct {
 	tripRepo   *repository.TripRepository
 }
 
-type Graph map[string]map[string]int
+type tripInfo struct {
+	name   string
+	amount float64
+}
+
+type graphEdge struct {
+	amount float64
+	trips  map[uint]*tripInfo // tripID -> per-trip contribution
+}
+
+type Graph map[string]map[string]*graphEdge
+
+type nettingEvent struct {
+	debtorName   string
+	creditorName string
+	amount       float64
+	tripID       uint
+}
+
+type settlementResult struct {
+	Settlements     []models.Settlement
+	TripAdjustments map[uint]map[uint]float64
+}
 
 func NewBalanceService(
 	memberRepo *repository.MemberRepository,
@@ -24,30 +46,65 @@ func NewBalanceService(
 }
 
 func (s *BalanceService) GetBalances() (*models.BalanceResponse, error) {
+	members, err := s.memberRepo.FindAll()
+	if err != nil {
+		return nil, err
+	}
 	trips, err := s.tripRepo.FindAll()
 	if err != nil {
 		return nil, err
 	}
 
-	balances := make([][]models.MemberBalance, len(trips))
-	for idx, trip := range trips {
-		tripMembers := make([]models.MemberBalance, len(trip.Members))
-		for i := 0; i < len(trip.Members); i++ {
-			m := trip.Members[i]
-			tripMembers[i] = models.MemberBalance{
-				Member:  m,
-				Balance: m.Balance,
-				TripID:  trip.ID,
-			}
+	perTripBalances := make([][]models.MemberBalance, 0, len(trips))
+
+	for _, trip := range trips {
+		if len(trip.Members) == 0 {
+			continue
 		}
-		balances[idx] = tripMembers
+		equalShare := trip.TotalCost / float64(len(trip.Members))
+
+		paidByMember := make(map[uint]float64)
+		for _, p := range trip.Payments {
+			paidByMember[p.MemberID] += p.Amount
+		}
+
+		tripBalances := make([]models.MemberBalance, 0, len(trip.Members))
+		for _, m := range trip.Members {
+			bal := paidByMember[m.ID] - equalShare
+			tripBalances = append(tripBalances, models.MemberBalance{
+				Member:   m,
+				Balance:  bal,
+				TripID:   trip.ID,
+				TripName: trip.Name,
+			})
+		}
+		perTripBalances = append(perTripBalances, tripBalances)
 	}
 
-	settlements := ComputeSettlements(balances)
+	result := ComputeSettlements(perTripBalances)
+
+	nameToID := make(map[string]uint)
+	for _, m := range members {
+		nameToID[m.Name] = m.ID
+	}
+	netPosition := make(map[uint]float64)
+	for _, s := range result.Settlements {
+		netPosition[nameToID[s.ToName]] += s.Amount
+		netPosition[nameToID[s.FromName]] -= s.Amount
+	}
+
+	balances := make([]models.MemberBalance, 0, len(members))
+	for _, m := range members {
+		balances = append(balances, models.MemberBalance{
+			Member:  m,
+			Balance: math.Round(netPosition[m.ID]*100) / 100,
+		})
+	}
 
 	return &models.BalanceResponse{
-		Balances:    balances,
-		Settlements: settlements,
+		Balances:        balances,
+		Settlements:     result.Settlements,
+		TripAdjustments: result.TripAdjustments,
 	}, nil
 }
 
@@ -110,71 +167,137 @@ func ComputeBalanceMap(members []models.Member, trips []models.Trip) map[uint]fl
 	return balanceMap
 }
 
-// ComputeSettlements builds a settlement list: for each creditor (overpayer),
-// every debtor owes them overpayment / number_of_debtors.
-func ComputeSettlements(balances [][]models.MemberBalance) []models.Settlement {
+// ComputeSettlements builds a directed graph of who-owes-whom across all trips,
+// then simplifies bidirectional edges to net amounts.
+func ComputeSettlements(balances [][]models.MemberBalance) settlementResult {
 	graph := Graph{}
+	nameToID := make(map[string]uint)
 
 	for _, trip := range balances {
-		payerName, _ := findPayer(trip)
-		for _, member := range trip {
-			if member.Balance < -0.01 {
-				if _, exists := graph[member.Member.Name]; !exists {
-					graph[member.Member.Name] = make(map[string]int)
+		var tripID uint
+		var tripName string
+		var creditors []models.MemberBalance
+		totalPositive := 0.0
+		for _, m := range trip {
+			nameToID[m.Member.Name] = m.Member.ID
+			if tripID == 0 {
+				tripID = m.TripID
+				tripName = m.TripName
+			}
+			if m.Balance > 0.01 {
+				creditors = append(creditors, m)
+				totalPositive += m.Balance
+			}
+		}
+		if len(creditors) == 0 {
+			continue
+		}
+
+		for _, debtor := range trip {
+			if debtor.Balance >= -0.01 {
+				continue
+			}
+			debt := math.Abs(debtor.Balance)
+			for _, creditor := range creditors {
+				share := debt * creditor.Balance / totalPositive
+				if share < 0.01 {
+					continue
 				}
-				graph[member.Member.Name][payerName] = int(math.Abs(member.Balance))
+				from := debtor.Member.Name
+				to := creditor.Member.Name
+				if graph[from] == nil {
+					graph[from] = make(map[string]*graphEdge)
+				}
+				edge := graph[from][to]
+				if edge == nil {
+					edge = &graphEdge{trips: make(map[uint]*tripInfo)}
+					graph[from][to] = edge
+				}
+				edge.amount += share
+				ti := edge.trips[tripID]
+				if ti == nil {
+					ti = &tripInfo{name: tripName}
+					edge.trips[tripID] = ti
+				}
+				ti.amount += share
 			}
 		}
 	}
 
-	simplifyGraph(graph)
+	events := simplifyGraph(graph)
+
+	adjustments := make(map[uint]map[uint]float64)
+	for _, ev := range events {
+		if adjustments[ev.tripID] == nil {
+			adjustments[ev.tripID] = make(map[uint]float64)
+		}
+		adjustments[ev.tripID][nameToID[ev.debtorName]] += ev.amount
+		adjustments[ev.tripID][nameToID[ev.creditorName]] -= ev.amount
+	}
+	for tid, members := range adjustments {
+		for mid, v := range members {
+			adjustments[tid][mid] = math.Round(v*100) / 100
+		}
+	}
 
 	var settlements []models.Settlement
-	for i, node := range graph {
-		for name, amount := range node {
+	for from, neighbors := range graph {
+		for to, edge := range neighbors {
+			if edge.amount < 0.01 {
+				continue
+			}
+			var tripNames []string
+			for _, ti := range edge.trips {
+				if ti.amount > 0.01 {
+					tripNames = append(tripNames, ti.name)
+				}
+			}
 			settlements = append(settlements, models.Settlement{
-				FromName: i,
-				ToName:   name,
-				Amount:   float64(amount),
+				FromName:  from,
+				ToName:    to,
+				Amount:    math.Round(edge.amount*100) / 100,
+				TripNames: tripNames,
 			})
 		}
 	}
 
-	return settlements
-}
-
-func findPayer(trip []models.MemberBalance) (string, uint) {
-	for _, m := range trip {
-		if m.Balance > 0 {
-			return m.Member.Name, m.Member.ID
-		}
+	return settlementResult{
+		Settlements:     settlements,
+		TripAdjustments: adjustments,
 	}
-	return "", 0
 }
 
-func simplifyGraph(graph map[string]map[string]int) {
+func simplifyGraph(graph Graph) []nettingEvent {
+	var events []nettingEvent
 	visited := make(map[string]map[string]bool)
 
-	for u, neighbors := range graph {
+	for u := range graph {
 		if _, ok := visited[u]; !ok {
 			visited[u] = make(map[string]bool)
 		}
 
-		for v, weightUV := range neighbors {
+		for v, edgeUV := range graph[u] {
 			if visited[u][v] || visited[v][u] {
 				continue
 			}
 
 			if reverseNeighbors, ok := graph[v]; ok {
-				if weightVU, exists := reverseNeighbors[u]; exists {
-
-					if weightUV > weightVU {
-						graph[u][v] = weightUV - weightVU
+				if edgeVU, exists := reverseNeighbors[u]; exists {
+					if edgeUV.amount > edgeVU.amount {
+						events = append(events, netEdgePair(edgeVU, v, u, edgeUV, u, v)...)
+						edgeUV.amount -= edgeVU.amount
 						delete(graph[v], u)
-					} else if weightVU > weightUV {
-						graph[v][u] = weightVU - weightUV
+					} else if edgeVU.amount > edgeUV.amount {
+						events = append(events, netEdgePair(edgeUV, u, v, edgeVU, v, u)...)
+						edgeVU.amount -= edgeUV.amount
 						delete(graph[u], v)
 					} else {
+						for tripID, ti := range edgeUV.trips {
+							events = append(events, nettingEvent{u, v, ti.amount, tripID})
+						}
+						for tripID, ti := range edgeVU.trips {
+							events = append(events, nettingEvent{v, u, ti.amount, tripID})
+						}
 						delete(graph[u], v)
 						delete(graph[v], u)
 					}
@@ -188,4 +311,29 @@ func simplifyGraph(graph map[string]map[string]int) {
 			visited[v][u] = true
 		}
 	}
+
+	return events
 }
+
+// netEdgePair emits netting events when fully cancelling `cancelled` against the
+// surviving `survivor` edge, and proportionally deducts from survivor's trip contribs.
+func netEdgePair(
+	cancelled *graphEdge, cFrom, cTo string,
+	survivor *graphEdge, sFrom, sTo string,
+) []nettingEvent {
+	var events []nettingEvent
+	amount := cancelled.amount
+
+	for tripID, ti := range cancelled.trips {
+		events = append(events, nettingEvent{cFrom, cTo, ti.amount, tripID})
+	}
+
+	for tripID, ti := range survivor.trips {
+		deducted := amount * ti.amount / survivor.amount
+		ti.amount -= deducted
+		events = append(events, nettingEvent{sFrom, sTo, deducted, tripID})
+	}
+
+	return events
+}
+
