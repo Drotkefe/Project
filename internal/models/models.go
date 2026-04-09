@@ -69,25 +69,24 @@ type UpdatePaymentRequest struct {
 type MemberBalance struct {
 	Member  Member  `json:"member"`
 	Balance float64 `json:"balance"`
+	TripID  uint    `json:"trip_id"`
 }
 
 type Settlement struct {
-	FromID   uint    `json:"from_id"`
 	FromName string  `json:"from_name"`
-	ToID     uint    `json:"to_id"`
 	ToName   string  `json:"to_name"`
 	Amount   float64 `json:"amount"`
 }
 
 type BalanceResponse struct {
-	Balances    []MemberBalance `json:"balances"`
-	Settlements []Settlement    `json:"settlements"`
+	Balances    [][]MemberBalance `json:"balances"`
+	Settlements []Settlement      `json:"settlements"`
 }
 
 type TripDetail struct {
-	Trip        Trip             `json:"trip"`
-	EqualShare  float64          `json:"equal_share"`
-	Breakdowns  []TripBreakdown  `json:"breakdowns"`
+	Trip       Trip            `json:"trip"`
+	EqualShare float64         `json:"equal_share"`
+	Breakdowns []TripBreakdown `json:"breakdowns"`
 }
 
 type TripBreakdown struct {

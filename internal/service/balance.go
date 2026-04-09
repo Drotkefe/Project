@@ -2,7 +2,6 @@ package service
 
 import (
 	"math"
-	"sort"
 	"tripshare/internal/models"
 	"tripshare/internal/repository"
 )
@@ -11,6 +10,8 @@ type BalanceService struct {
 	memberRepo *repository.MemberRepository
 	tripRepo   *repository.TripRepository
 }
+
+type Graph map[string]map[string]int
 
 func NewBalanceService(
 	memberRepo *repository.MemberRepository,
@@ -23,17 +24,23 @@ func NewBalanceService(
 }
 
 func (s *BalanceService) GetBalances() (*models.BalanceResponse, error) {
-	members, err := s.memberRepo.FindAll()
+	trips, err := s.tripRepo.FindAll()
 	if err != nil {
 		return nil, err
 	}
 
-	balances := make([]models.MemberBalance, len(members))
-	for i, m := range members {
-		balances[i] = models.MemberBalance{
-			Member:  m,
-			Balance: m.Balance,
+	balances := make([][]models.MemberBalance, len(trips))
+	for idx, trip := range trips {
+		tripMembers := make([]models.MemberBalance, len(trip.Members))
+		for i := 0; i < len(trip.Members); i++ {
+			m := trip.Members[i]
+			tripMembers[i] = models.MemberBalance{
+				Member:  m,
+				Balance: m.Balance,
+				TripID:  trip.ID,
+			}
 		}
+		balances[idx] = tripMembers
 	}
 
 	settlements := ComputeSettlements(balances)
@@ -105,47 +112,80 @@ func ComputeBalanceMap(members []models.Member, trips []models.Trip) map[uint]fl
 
 // ComputeSettlements builds a settlement list: for each creditor (overpayer),
 // every debtor owes them overpayment / number_of_debtors.
-func ComputeSettlements(balances []models.MemberBalance) []models.Settlement {
-	type entry struct {
-		id      uint
-		name    string
-		balance float64
-	}
+func ComputeSettlements(balances [][]models.MemberBalance) []models.Settlement {
+	graph := Graph{}
 
-	var debtors []entry
-	var creditors []entry
-
-	for _, b := range balances {
-		if b.Balance < -0.01 {
-			debtors = append(debtors, entry{b.Member.ID, b.Member.Name, b.Balance})
-		} else if b.Balance > 0.01 {
-			creditors = append(creditors, entry{b.Member.ID, b.Member.Name, b.Balance})
+	for _, trip := range balances {
+		payerName, _ := findPayer(trip)
+		for _, member := range trip {
+			if member.Balance < -0.01 {
+				if _, exists := graph[member.Member.Name]; !exists {
+					graph[member.Member.Name] = make(map[string]int)
+				}
+				graph[member.Member.Name][payerName] = int(math.Abs(member.Balance))
+			}
 		}
 	}
 
-	if len(debtors) == 0 || len(creditors) == 0 {
-		return nil
-	}
-
-	sort.Slice(creditors, func(i, j int) bool { return creditors[i].balance > creditors[j].balance })
-	sort.Slice(debtors, func(i, j int) bool { return debtors[i].name < debtors[j].name })
+	simplifyGraph(graph)
 
 	var settlements []models.Settlement
-	for _, c := range creditors {
-		perDebtor := math.Round(c.balance/float64(len(debtors))*100) / 100
-		if perDebtor < 0.01 {
-			continue
-		}
-		for _, d := range debtors {
+	for i, node := range graph {
+		for name, amount := range node {
 			settlements = append(settlements, models.Settlement{
-				FromID:   d.id,
-				FromName: d.name,
-				ToID:     c.id,
-				ToName:   c.name,
-				Amount:   perDebtor,
+				FromName: i,
+				ToName:   name,
+				Amount:   float64(amount),
 			})
 		}
 	}
 
 	return settlements
+}
+
+func findPayer(trip []models.MemberBalance) (string, uint) {
+	for _, m := range trip {
+		if m.Balance > 0 {
+			return m.Member.Name, m.Member.ID
+		}
+	}
+	return "", 0
+}
+
+func simplifyGraph(graph map[string]map[string]int) {
+	visited := make(map[string]map[string]bool)
+
+	for u, neighbors := range graph {
+		if _, ok := visited[u]; !ok {
+			visited[u] = make(map[string]bool)
+		}
+
+		for v, weightUV := range neighbors {
+			if visited[u][v] || visited[v][u] {
+				continue
+			}
+
+			if reverseNeighbors, ok := graph[v]; ok {
+				if weightVU, exists := reverseNeighbors[u]; exists {
+
+					if weightUV > weightVU {
+						graph[u][v] = weightUV - weightVU
+						delete(graph[v], u)
+					} else if weightVU > weightUV {
+						graph[v][u] = weightVU - weightUV
+						delete(graph[u], v)
+					} else {
+						delete(graph[u], v)
+						delete(graph[v], u)
+					}
+				}
+			}
+
+			if _, ok := visited[v]; !ok {
+				visited[v] = make(map[string]bool)
+			}
+			visited[u][v] = true
+			visited[v][u] = true
+		}
+	}
 }
