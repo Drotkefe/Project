@@ -95,6 +95,7 @@ function renderDashboard() {
       <span class="settlement-from">${esc(s.from_name)}</span>
       <span class="settlement-arrow">&rarr;</span>
       <span class="settlement-to">${esc(s.to_name)}</span>
+      <span class="settlement-trips">${(s.trip_names || []).map(n => esc(n)).join(', ')}</span>
       <span class="settlement-amount">${fmt(s.amount)} HUF</span>
     </div>`
   ).join('');
@@ -181,11 +182,15 @@ function renderTrips() {
     const numMembers = (t.members || []).length;
     const equalShare = numMembers > 0 ? t.total_cost / numMembers : 0;
 
+    const tripAdj = balanceData.trip_adjustments?.[t.id] || {};
+
     const breakdownRows = (t.members || []).map(m => {
       const paid = (t.payments || [])
         .filter(p => p.member_id === m.id)
         .reduce((s, p) => s + p.amount, 0);
-      const delta = paid - equalShare;
+      const rawDelta = paid - equalShare;
+      const adj = tripAdj[m.id] || 0;
+      const delta = rawDelta + adj;
       const cls = delta > 0.01 ? 'positive' : delta < -0.01 ? 'negative' : '';
       const sign = delta > 0 ? '+' : '';
       return `<tr>
